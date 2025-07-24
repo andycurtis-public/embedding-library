@@ -1,0 +1,12 @@
+
+if(NOT EXISTS "/Users/ac/git/knode-ai-open-source/embedding-library/build/install_manifest.txt")
+    message(FATAL_ERROR "Cannot find install manifest: /Users/ac/git/knode-ai-open-source/embedding-library/build/install_manifest.txt")
+endif()
+file(READ "/Users/ac/git/knode-ai-open-source/embedding-library/build/install_manifest.txt" files)
+string(REGEX REPLACE "\n" ";" files "${files}")
+foreach(file "${files}")
+    message(STATUS "Uninstalling $ENV{DESTDIR}${file}")
+    if(EXISTS "$ENV{DESTDIR}${file}")
+        execute_process(COMMAND /usr/local/Cellar/cmake/3.27.0/bin/cmake -E remove "$ENV{DESTDIR}${file}")
+    endif()
+endforeach()

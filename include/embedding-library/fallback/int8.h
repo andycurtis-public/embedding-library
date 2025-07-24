@@ -4,6 +4,9 @@
 #ifndef _embed_fallback_b8_H
 #define _embed_fallback_b8_H
 
+#include <stdint.h>
+#include <stddef.h>
+
 static inline int32_t int8_dot_product_scalar(const int8_t *a, const int8_t *b, size_t size) {
     int32_t result = 0;
     for (size_t i = 0; i < size; ++i) {

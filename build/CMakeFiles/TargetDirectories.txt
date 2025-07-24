@@ -1,0 +1,9 @@
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/embedding-library_debug.dir
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/embedding-library_static.dir
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/uninstall.dir
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/edit_cache.dir
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/rebuild_cache.dir
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/list_install_components.dir
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/install.dir
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/install/local.dir
+/Users/ac/git/knode-ai-open-source/embedding-library/build/CMakeFiles/install/strip.dir

@@ -4,6 +4,8 @@
 #ifndef _embed_x86_float_H
 #define _embed_x86_float_H
 
+#include <stdint.h>
+#include <stddef.h>
 #include <immintrin.h> // AVX intrinsics for x86
 
 #if defined(__AVX512F__)
