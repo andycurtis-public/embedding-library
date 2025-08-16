@@ -6,38 +6,28 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <math.h>
 
-// Quantize a floating-point array to int16_t
+/* Quantize float -> int16 with clamping */
 static inline
 void int16_from_floats(const float *input, size_t num_floats, int16_t *output) {
-    // Find the maximum absolute value in the input vector
     float max_abs = 0.0f;
     for (size_t i = 0; i < num_floats; ++i) {
-        float abs_val = fabsf(input[i]);
-        if (abs_val > max_abs) {
-            max_abs = abs_val;
-        }
+        float v = fabsf(input[i]);
+        if (v > max_abs) max_abs = v;
     }
+    if (max_abs == 0.0f) max_abs = 1.0f;
 
-    // Avoid division by zero
-    if (max_abs == 0.0f) {
-        max_abs = 1.0f; // Default to 1.0f to prevent divide-by-zero
-    }
-
-    // Compute the scale factor
-    float scale_factor = 32767.0f / max_abs;
-
-    // Scale and quantize the input
+    const float s = 32767.0f / max_abs;
     for (size_t i = 0; i < num_floats; ++i) {
-        output[i] = (int16_t)roundf(input[i] * scale_factor);
+        float x = roundf(input[i] * s);
+        if (x >  32767.0f) x =  32767.0f;
+        if (x < -32768.0f) x = -32768.0f;
+        output[i] = (int16_t)x;
     }
 }
 
-// Dequantize an int16_t array to floating-point
+/* Dequantize int16 -> float with provided scale */
 static inline
 void int16_to_floats(const int16_t *input, size_t num_floats, float *output, float scale_factor) {
     for (size_t i = 0; i < num_floats; ++i) {

@@ -6,47 +6,38 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <immintrin.h> // AVX intrinsics for x86
+#include <immintrin.h>
 
 #if defined(__AVX512F__)
-
-// AVX-512 implementation of dot product (optimized for size divisible by 16)
+/* AVX-512 implementation with scalar tail */
 static inline float dot_product_avx(const float *a, const float *b, size_t size) {
-    __m512 sum = _mm512_setzero_ps(); // 512-bit register for accumulating sums
-
-    for (size_t i = 0; i < size; i += 16) {
-        __m512 va = _mm512_loadu_ps(a + i); // Load 16 floats from vector a
-        __m512 vb = _mm512_loadu_ps(b + i); // Load 16 floats from vector b
-        sum = _mm512_add_ps(sum, _mm512_mul_ps(va, vb)); // Multiply and accumulate
+    __m512 sum = _mm512_setzero_ps();
+    size_t i = 0;
+    for (; i + 16 <= size; i += 16) {
+        __m512 va = _mm512_loadu_ps(a + i);
+        __m512 vb = _mm512_loadu_ps(b + i);
+        sum = _mm512_add_ps(sum, _mm512_mul_ps(va, vb));
     }
-
-    // Horizontal sum of all elements in the register
-    return _mm512_reduce_add_ps(sum);
+    float acc = _mm512_reduce_add_ps(sum);
+    for (; i < size; ++i) acc += a[i] * b[i];
+    return acc;
 }
-
 #else
-
-// AVX implementation of dot product (fallback for non-AVX512 systems)
+/* AVX (256-bit) implementation with scalar tail */
 static inline float dot_product_avx(const float *a, const float *b, size_t size) {
-    __m256 sum = _mm256_setzero_ps(); // 256-bit register for accumulating sums
-
-    for (size_t i = 0; i < size; i += 8) {
-        __m256 va = _mm256_loadu_ps(a + i); // Load 8 floats from vector a
-        __m256 vb = _mm256_loadu_ps(b + i); // Load 8 floats from vector b
-        sum = _mm256_add_ps(sum, _mm256_mul_ps(va, vb)); // Multiply and accumulate
+    __m256 sum = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= size; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        sum = _mm256_add_ps(sum, _mm256_mul_ps(va, vb));
     }
-
-    // Sum the elements in the 256-bit register
     float partial[8];
     _mm256_storeu_ps(partial, sum);
-    float result = 0.0f;
-    for (int i = 0; i < 8; ++i) {
-        result += partial[i];
-    }
-
-    return result;
+    float acc = partial[0]+partial[1]+partial[2]+partial[3]+partial[4]+partial[5]+partial[6]+partial[7];
+    for (; i < size; ++i) acc += a[i] * b[i];
+    return acc;
 }
-
 #endif
 
 #endif // _embed_x86_float_H

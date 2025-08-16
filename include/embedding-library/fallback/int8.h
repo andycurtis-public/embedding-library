@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2024-2025 Knode.ai
 // SPDX-License-Identifier: Apache-2.0
 // Maintainer: Andy Curtis <contactandyc@gmail.com>
-#ifndef _embed_fallback_b8_H
-#define _embed_fallback_b8_H
+#ifndef _embed_fallback_int8_H
+#define _embed_fallback_int8_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -10,9 +10,9 @@
 static inline int32_t int8_dot_product_scalar(const int8_t *a, const int8_t *b, size_t size) {
     int32_t result = 0;
     for (size_t i = 0; i < size; ++i) {
-        result += a[i] * b[i];
+        result += (int32_t)a[i] * (int32_t)b[i];
     }
     return result;
 }
 
-#endif
+#endif /* _embed_fallback_int8_H */

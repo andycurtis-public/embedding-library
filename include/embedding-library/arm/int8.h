@@ -1,39 +1,38 @@
 // SPDX-FileCopyrightText: 2024-2025 Knode.ai
 // SPDX-License-Identifier: Apache-2.0
 // Maintainer: Andy Curtis <contactandyc@gmail.com>
-#ifndef _embed_arm_b8_H
-#define _embed_arm_b8_H
+#ifndef _embed_arm_int8_H
+#define _embed_arm_int8_H
 
 #include <arm_neon.h>
 #include <stdint.h>
 #include <stddef.h>
 
-// Compute dot product directly for signed 8-bit embeddings (b8)
-static inline
-int32_t int8_dot_product_neon(const int8_t *embeddingA, const int8_t *embeddingB, size_t embedding_size) {
-    int32x4_t total_sum = vdupq_n_s32(0);  // Initialize a 128-bit accumulator
+static inline int32_t int8_dot_product_neon(const int8_t *a, const int8_t *b, size_t n) {
+    int32x4_t acc = vdupq_n_s32(0);
+    size_t i = 0;
 
-    for (size_t i = 0; i < embedding_size; i += 16) {  // Process 16 elements at a time
-        // Load 16 signed 8-bit values from each embedding
-        int8x16_t embeddingA_values = vld1q_s8(&embeddingA[i]);
-        int8x16_t embeddingB_values = vld1q_s8(&embeddingB[i]);
+    for (; i + 16 <= n; i += 16) {
+        int8x16_t va = vld1q_s8(a + i);
+        int8x16_t vb = vld1q_s8(b + i);
 
-        // Multiply and accumulate lower 8 bytes (8 elements)
-        int16x8_t product_low = vmull_s8(vget_low_s8(embeddingA_values), vget_low_s8(embeddingB_values));
+        int16x8_t lo = vmull_s8(vget_low_s8(va),  vget_low_s8(vb));
+        int16x8_t hi = vmull_s8(vget_high_s8(va), vget_high_s8(vb));
 
-        // Multiply and accumulate upper 8 bytes (8 elements)
-        int16x8_t product_high = vmull_s8(vget_high_s8(embeddingA_values), vget_high_s8(embeddingB_values));
-
-        // Accumulate results into the total sum
-        total_sum = vaddq_s32(total_sum, vaddl_s16(vget_low_s16(product_low), vget_high_s16(product_low)));
-        total_sum = vaddq_s32(total_sum, vaddl_s16(vget_low_s16(product_high), vget_high_s16(product_high)));
+        acc = vaddq_s32(acc, vaddl_s16(vget_low_s16(lo), vget_high_s16(lo)));
+        acc = vaddq_s32(acc, vaddl_s16(vget_low_s16(hi), vget_high_s16(hi)));
     }
 
-    // Perform horizontal sum to get the final result
-    int32x2_t sum_pair = vadd_s32(vget_low_s32(total_sum), vget_high_s32(total_sum)); // Add low and high parts
-    int32_t final_sum = vget_lane_s32(vpadd_s32(sum_pair, sum_pair), 0); // Add across lanes
+#if defined(__aarch64__)
+    int32_t sum = vaddvq_s32(acc);
+#else
+    int32x2_t pair = vadd_s32(vget_low_s32(acc), vget_high_s32(acc));
+    pair = vpadd_s32(pair, pair);
+    int32_t sum = vget_lane_s32(pair, 0);
+#endif
 
-    return final_sum;
+    for (; i < n; ++i) sum += (int32_t)a[i] * (int32_t)b[i];
+    return sum;
 }
 
-#endif // _embed_arm_b8_H
+#endif /* _embed_arm_int8_H */

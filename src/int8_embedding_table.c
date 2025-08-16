@@ -5,142 +5,281 @@
 #include "embedding-library/int8.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
-// Add an embedding to the table
-ssize_t int8_embedding_table_add_embedding(int8_embedding_table_t *t, const int8_t *embedding,
-                                           double norm) {
-    if(norm < 0.0) {
-        // compute again
-        uint32_t dot_product = int8_dot_product(embedding, embedding, 512);
-        if(!dot_product)
-            return -1;
-        double dp = dot_product;
-        norm = sqrt(dp);
-    }
-    if(norm == 0.0)
-        return -1;
+#define EMBEDDING_DIM 512u          /* each embedding has 512 int8 elements */
+#define NODE_CAPACITY 512u          /* a node stores 512 embeddings */
+#define NODE_SHIFT    9u            /* log2(NODE_CAPACITY) */
 
-    if (t->index > 0) {
-        int8_embedding_node_t *n = t->table[t->index - 1];
-        if (n->size < 512) {
-            int8_t *data = n->data + (n->size * 512); // Move to the next embedding slot
-            memcpy(data, embedding, 512); // copies 512 bytes from embedding to data
-            n->norms[n->size] = norm;
-            n->size++;
-            return (((t->index - 1) << 9) + n->size) - 1;
+/* internal helper to allocate one node:
+ * layout: [512 doubles | 512 * 512 int8]
+ * returns 0 on success, -1 on failure
+ */
+static int alloc_node(int8_embedding_node_t **out_node) {
+    *out_node = NULL;
+
+    const size_t norms_count = NODE_CAPACITY;
+    const size_t bytes =
+        norms_count * sizeof(double) +
+        (size_t)NODE_CAPACITY * (size_t)EMBEDDING_DIM * sizeof(int8_t);
+
+    void *mem = NULL;
+#if defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200112L
+    if (posix_memalign(&mem, 64, bytes) != 0) {
+        mem = NULL; /* fall through to malloc */
+    }
+#endif
+    if (!mem) {
+        mem = malloc(bytes);
+        if (!mem) {
+            return -1;
         }
     }
-    double *norms = NULL;
-    int8_t *data = NULL;
-    posix_memalign((void **)&norms, 64, 512 * (512 + sizeof(double)));
-    data = (int8_t *)(norms + 512);
-    int8_embedding_node_t *n = (int8_embedding_node_t *)malloc(sizeof(int8_embedding_node_t));
-    n->data = data;
-    n->norms = norms;
-    memcpy(data, embedding, 512);
-    n->norms[0] = norm;
-    t->table[t->index] = n;
-    n->size = 1;
-    t->index++;
-    return (((t->index - 1) << 9) + n->size) - 1;
+
+    int8_embedding_node_t *n = (int8_embedding_node_t *)malloc(sizeof(*n));
+    if (!n) {
+        free(mem);
+        return -1;
+    }
+
+    n->norms = (double *)mem;
+    n->data  = (int8_t *)(n->norms + norms_count);
+    n->size  = 0;
+
+    *out_node = n;
+    return 0;
 }
 
+/* ensure table has room for another node; returns 0 on success, -1 on failure */
+static int ensure_table_capacity(int8_embedding_table_t *t) {
+    if (t->index < t->size) return 0;
+    size_t new_size = (t->size == 0) ? (1024u * NODE_CAPACITY) : (t->size * 2u);
+    int8_embedding_node_t **p =
+        (int8_embedding_node_t **)realloc(t->table, new_size * sizeof(*t->table));
+    if (!p) return -1;
+    t->table = p;
+    t->size  = new_size;
+    return 0;
+}
+
+/* Add an embedding to the table.
+ * If norm < 0.0, recompute as sqrt(dot(e,e)).
+ * Returns global index (>=0) on success, or -1 on failure.
+ */
+ssize_t int8_embedding_table_add_embedding(int8_embedding_table_t *t,
+                                           const int8_t *embedding,
+                                           double norm) {
+    if (!t || !embedding) return -1;
+
+    if (norm < 0.0) {
+        /* int8_dot_product returns signed int32; sum of squares is non-negative */
+        int32_t dp32 = int8_dot_product(embedding, embedding, EMBEDDING_DIM);
+        if (dp32 <= 0) return -1;
+        norm = sqrt((double)dp32);
+    }
+    if (norm == 0.0) return -1;
+
+    /* try to append to the last (not-full) node */
+    if (t->index > 0) {
+        int8_embedding_node_t *n = t->table[t->index - 1];
+        if (n && n->size < NODE_CAPACITY) {
+            int8_t *dst = n->data + ((size_t)n->size * EMBEDDING_DIM);
+            memcpy(dst, embedding, EMBEDDING_DIM);
+            n->norms[n->size] = norm;
+            n->size++;
+            /* global index = all-full-nodes * 512 + (n->size - 1) */
+            return (ssize_t)(((t->index - 1) << NODE_SHIFT) + (n->size - 1));
+        }
+    }
+
+    /* need a new node */
+    if (ensure_table_capacity(t) != 0) return -1;
+
+    int8_embedding_node_t *n = NULL;
+    if (alloc_node(&n) != 0) return -1;
+
+    memcpy(n->data, embedding, EMBEDDING_DIM);
+    n->norms[0] = norm;
+    n->size = 1;
+
+    t->table[t->index] = n;
+    t->index++;
+
+    return (ssize_t)(((t->index - 1) << NODE_SHIFT) + (n->size - 1));
+}
 
 int8_embedding_table_t *int8_embedding_table_init(size_t size) {
-    if (size == 0)
-        size = 1024*512; // Default size supporting ~268 million embeddings
-    int8_embedding_table_t *t = (int8_embedding_table_t *)malloc(sizeof(int8_embedding_table_t));
-    t->table = (int8_embedding_node_t **)malloc(size * sizeof(int8_embedding_node_t *));
-    t->size = size;
+    if (size == 0) {
+        size = 1024u * NODE_CAPACITY; /* default ~268M embeddings capacity */
+    }
+    int8_embedding_table_t *t =
+        (int8_embedding_table_t *)calloc(1, sizeof(*t));
+    if (!t) return NULL;
+
+    t->table = (int8_embedding_node_t **)calloc(size, sizeof(*t->table));
+    if (!t->table) {
+        free(t);
+        return NULL;
+    }
+    t->size  = size;
     t->index = 0;
     return t;
 }
 
 void int8_embedding_table_destroy(int8_embedding_table_t *t) {
+    if (!t) return;
     for (size_t i = 0; i < t->index; i++) {
-        free(t->table[i]->norms);
-        free(t->table[i]);
+        if (t->table[i]) {
+            /* single allocation starting at norms */
+            free(t->table[i]->norms);
+            free(t->table[i]);
+        }
     }
     free(t->table);
     free(t);
 }
 
 void int8_embedding_table_serialize(int8_embedding_table_t *t, const char *filename) {
+    if (!t || !filename) return;
+
     FILE *file = fopen(filename, "ab+");
     if (!file) {
-        perror("Failed to open file");
+        perror("int8_embedding_table_serialize: fopen");
         return;
     }
 
-    // Determine the current file size
-    fseek(file, 0, SEEK_END);
+    /* Determine current file size */
+    if (fseek(file, 0, SEEK_END) != 0) {
+        perror("int8_embedding_table_serialize: fseek");
+        fclose(file);
+        return;
+    }
     long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
+    if (file_size < 0) {
+        perror("int8_embedding_table_serialize: ftell");
+        fclose(file);
+        return;
+    }
 
-    const size_t record_size = sizeof(double) + 512;
-    size_t existing_records = (file_size >= 0) ? file_size / record_size : 0;
-
-    size_t total_records = int8_embedding_table_size(t);
-
-    // Truncate file if necessary
-    if (file_size < 0 || existing_records > total_records) {
+    const size_t record_size = sizeof(double) + EMBEDDING_DIM * sizeof(int8_t);
+    if ((size_t)file_size % record_size != 0) {
+        /* partial/corrupt file: truncate */
         fclose(file);
         file = fopen(filename, "wb");
         if (!file) {
-            perror("Failed to reopen file for truncation");
+            perror("int8_embedding_table_serialize: reopen wb");
+            return;
+        }
+        file_size = 0;
+    }
+
+    size_t existing_records = (size_t)file_size / record_size;
+    size_t total_records    = int8_embedding_table_size(t);
+
+    /* If file has more records than table, truncate to table size */
+    if (existing_records > total_records) {
+        fclose(file);
+        file = fopen(filename, "wb");
+        if (!file) {
+            perror("int8_embedding_table_serialize: truncate wb");
             return;
         }
         existing_records = 0;
     }
 
-    // Serialize only new records
+    /* Append new records */
     for (size_t i = existing_records; i < total_records; i++) {
-        double norm = int8_embedding_table_norm(t, i);
-        fwrite(&norm, sizeof(double), 1, file);
-        fwrite(int8_embedding_table_embedding(t, i), sizeof(int8_t), 512, file);
+        double  norm = int8_embedding_table_norm(t, i);
+        int8_t *vec  = int8_embedding_table_embedding(t, i);
+        if (!vec) break;
+
+        if (fwrite(&norm, sizeof(double), 1, file) != 1) {
+            perror("int8_embedding_table_serialize: fwrite(norm)");
+            break;
+        }
+        if (fwrite(vec, sizeof(int8_t), EMBEDDING_DIM, file) != EMBEDDING_DIM) {
+            perror("int8_embedding_table_serialize: fwrite(vec)");
+            break;
+        }
     }
 
+    fflush(file);
     fclose(file);
 }
 
 int8_embedding_table_t *int8_embedding_table_deserialize(const char *filename) {
+    if (!filename) return NULL;
+
     FILE *file = fopen(filename, "rb");
     if (!file) {
-        perror("Failed to open file");
+        perror("int8_embedding_table_deserialize: fopen");
         return NULL;
     }
 
-    fseek(file, 0, SEEK_END);
+    if (fseek(file, 0, SEEK_END) != 0) {
+        perror("int8_embedding_table_deserialize: fseek");
+        fclose(file);
+        return NULL;
+    }
     long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
     if (file_size <= 0) {
         fclose(file);
         return NULL;
     }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        perror("int8_embedding_table_deserialize: rewind");
+        fclose(file);
+        return NULL;
+    }
 
-    const size_t record_size = sizeof(double) + 512;
-    size_t num_records = file_size / record_size;
+    const size_t record_size = sizeof(double) + EMBEDDING_DIM * sizeof(int8_t);
+    if ((size_t)file_size % record_size != 0) {
+        /* partial/corrupt file */
+        fclose(file);
+        return NULL;
+    }
+
+    size_t num_records = (size_t)file_size / record_size;
 
     int8_embedding_table_t *table = int8_embedding_table_init(0);
+    if (!table) {
+        fclose(file);
+        return NULL;
+    }
 
     for (size_t i = 0; i < num_records; i++) {
-        size_t node_index = i >> 9;
-        size_t offset = i & 0x1FF;
+        size_t node_index = i >> NODE_SHIFT;  /* i / 512 */
+        size_t offset     = i & (NODE_CAPACITY - 1); /* i % 512 */
 
         if (node_index >= table->index) {
-            int8_embedding_node_t *node = (int8_embedding_node_t *)malloc(sizeof(int8_embedding_node_t));
-            posix_memalign((void **)&node->norms, 64, 512 * (512 + sizeof(double)));
-            node->data = (int8_t *)(node->norms + 512);
-            node->size = 0;
+            if (ensure_table_capacity(table) != 0) {
+                int8_embedding_table_destroy(table);
+                fclose(file);
+                return NULL;
+            }
+            int8_embedding_node_t *node = NULL;
+            if (alloc_node(&node) != 0) {
+                int8_embedding_table_destroy(table);
+                fclose(file);
+                return NULL;
+            }
             table->table[table->index++] = node;
         }
 
         int8_embedding_node_t *node = table->table[node_index];
 
-        fread(&node->norms[offset], sizeof(double), 1, file);
-        fread(node->data + (offset * 512), sizeof(int8_t), 512, file);
+        if (fread(&node->norms[offset], sizeof(double), 1, file) != 1) {
+            int8_embedding_table_destroy(table);
+            fclose(file);
+            return NULL;
+        }
+        if (fread(node->data + (offset * EMBEDDING_DIM),
+                  sizeof(int8_t), EMBEDDING_DIM, file) != EMBEDDING_DIM) {
+            int8_embedding_table_destroy(table);
+            fclose(file);
+            return NULL;
+        }
 
         node->size++;
     }
