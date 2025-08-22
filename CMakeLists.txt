@@ -1,213 +1,264 @@
-# SPDX-FileCopyrightText: 2024-2025 Knode.ai
+# SPDX-FileCopyrightText: 2025 Andy Curtis <contactandyc@gmail.com>
+# SPDX-FileCopyrightText: 2024–2025 Knode.ai — technical questions: contact Andy (above)
 # SPDX-License-Identifier: Apache-2.0
-# Maintainer: Andy Curtis <contactandyc@gmail.com>
 
+# CMakeLists.txt for libraries (regular or header-only)
 cmake_minimum_required(VERSION 3.20)
-project(the_embedding_library VERSION 1.0.0 LANGUAGES C)
 
-# ── Build variant selection (matches your other libs) ──────────────────────────
-set(A_BUILD_VARIANT "debug" CACHE STRING "Build variant (debug|memory|coverage|static|shared)")
-set_property(CACHE A_BUILD_VARIANT PROPERTY STRINGS debug memory coverage static shared)
-
-# Flavor knobs (same names as your other libs)
-set(A_BUILD_MEMORY_DEFINE "_AML_DEBUG_" CACHE STRING "Macro for memory variant")
-set(A_BUILD_DEBUG_POSTFIX ""            CACHE STRING "Debug filename postfix")
-set(A_BUILD_IMPORT_NAME   ""            CACHE STRING "Exported target name for this flavor")
-
-# SIMD tuning
-set(EMBED_SIMD "auto" CACHE STRING "SIMD: auto|avx512|avx2|neon|off")
-set_property(CACHE EMBED_SIMD PROPERTY STRINGS auto avx512 avx2 neon off)
-option(EMBED_FAST_MATH "Enable fast-math (/fp:fast or -ffast-math where supported)" OFF)
-
-# ── Library sources ────────────────────────────────────────────────────────────
-add_library(${PROJECT_NAME}
-  src/int8_embedding_table.c
+project(embedding_library
+  VERSION 0.0.1
+  LANGUAGES C
 )
+# ── Variant selection for the umbrella alias (NOT for building) ───────────────
+# We build ALL variant targets below; this just selects which one the umbrella
+# alias (embedding_library::embedding_library) points to during this configure.
+set(A_BUILD_VARIANT "debug" CACHE STRING
+    "Umbrella choice for in-tree linking (debug|memory|static|shared)")
+set_property(CACHE A_BUILD_VARIANT PROPERTY STRINGS debug memory static shared)
 
-# Public headers
-target_include_directories(${PROJECT_NAME} PUBLIC
+# ── Developer-only coverage toggle (applies to this entire CMake tree) ────────
+option(A_ENABLE_COVERAGE "Enable code coverage instrumentation for this build" OFF)
+if(A_ENABLE_COVERAGE)
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    add_link_options(-fprofile-instr-generate -fcoverage-mapping)
+  elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-O0 -g --coverage)
+    add_link_options(--coverage)
+  endif()
+endif()
+
+# Memory-profile convenience for the *_memory variant
+option(A_BUILD_ENABLE_MEMORY_PROFILE "Define a macro on the 'memory' variant" OFF)
+set(A_BUILD_MEMORY_DEFINE "_AML_DEBUG_" CACHE STRING
+    "Macro to define on the 'memory' variant when memory profiling is enabled")
+
+# Emulate Debug/Release per-variant (so one configure can build both kinds)
+if(MSVC)
+  set(_A_DEBUG_OPTS /Zi /Od)
+  set(_A_RELEASE_OPTS /O2 /DNDEBUG)
+else()
+  set(_A_DEBUG_OPTS -O0 -g)
+  set(_A_RELEASE_OPTS -O3 -DNDEBUG)
+endif()
+
+include(GNUInstallDirs)
+
+# ---- Dependencies ----
+
+# ── Library variants (ALL are defined & built/installed) ──────────────────────
+add_library(embedding_library_debug  src/int8_embedding_table.c)
+
+target_include_directories(embedding_library_debug PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-set_target_properties(${PROJECT_NAME} PROPERTIES
-  C_STANDARD 99
+set_target_properties(embedding_library_debug PROPERTIES
+  C_STANDARD 17
   C_STANDARD_REQUIRED YES
   POSITION_INDEPENDENT_CODE ON
 )
 
-# Debug postfix and static name tweak (aligning with your pattern)
-if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND A_BUILD_DEBUG_POSTFIX)
-  set_target_properties(${PROJECT_NAME} PROPERTIES DEBUG_POSTFIX "${A_BUILD_DEBUG_POSTFIX}")
-endif()
-if(WIN32 AND NOT BUILD_SHARED_LIBS)
-  set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "${PROJECT_NAME}_s")
-endif()
-
-# ── Variant-specific compile settings ─────────────────────────────────────────
-if(A_BUILD_VARIANT STREQUAL "memory")
-  target_compile_definitions(${PROJECT_NAME} PUBLIC ${A_BUILD_MEMORY_DEFINE})
-elseif(A_BUILD_VARIANT STREQUAL "coverage")
-  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-    target_compile_options(${PROJECT_NAME} PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
-    target_link_options(${PROJECT_NAME}    PRIVATE -fprofile-instr-generate)
-  elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(${PROJECT_NAME} PRIVATE -O0 -g --coverage)
-    target_link_options(${PROJECT_NAME}    PRIVATE --coverage)
-  endif()
+if("CXX" IN_LIST CMAKE_PROJECT_LANGUAGES)
+  set_target_properties(embedding_library_debug PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+  )
 endif()
 
-# ── Optional fast-math (OFF by default) ───────────────────────────────────────
-if(EMBED_FAST_MATH)
-  if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /fp:fast)
-  elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(${PROJECT_NAME} PRIVATE -ffast-math)
-  endif()
+# Link deps once
+target_link_libraries(embedding_library_debug PUBLIC  m)
+
+# Per-variant optimization flavor
+target_compile_options(embedding_library_debug PRIVATE ${_A_DEBUG_OPTS})
+
+# Memory profiling macro on the memory variant (opt-in)
+
+# Install this variant
+install(TARGETS embedding_library_debug EXPORT embedding_libraryTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+add_library(embedding_library_memory  src/int8_embedding_table.c)
+
+target_include_directories(embedding_library_memory PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+set_target_properties(embedding_library_memory PROPERTIES
+  C_STANDARD 17
+  C_STANDARD_REQUIRED YES
+  POSITION_INDEPENDENT_CODE ON
+)
+
+if("CXX" IN_LIST CMAKE_PROJECT_LANGUAGES)
+  set_target_properties(embedding_library_memory PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+  )
 endif()
 
-# ── SIMD flags (portable defaults) ────────────────────────────────────────────
-# NOTE:
-#   - x86: your int8 AVX path uses AVX2 intrinsics -> enforce AVX2 (not just AVX).
-#   - AVX-512 path uses _mm512_maddubs_epi16 -> requires AVX512BW (and AVX512F).
-#   - aarch64: NEON is baseline; for 32-bit ARM enable -mfpu=neon if asked.
-#
-if(EMBED_SIMD STREQUAL "auto")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i.86)$")
-    set(EMBED_SIMD x86_auto)
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-    set(EMBED_SIMD neon)
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm")
-    set(EMBED_SIMD neon)
-  else()
-    set(EMBED_SIMD off)
-  endif()
+# Link deps once
+target_link_libraries(embedding_library_memory PUBLIC  m)
+
+# Per-variant optimization flavor
+target_compile_options(embedding_library_memory PRIVATE ${_A_DEBUG_OPTS})
+
+# Memory profiling macro on the memory variant (opt-in)
+if(A_BUILD_ENABLE_MEMORY_PROFILE)
+  target_compile_definitions(embedding_library_memory PUBLIC ${A_BUILD_MEMORY_DEFINE})
 endif()
 
-if(EMBED_SIMD STREQUAL "avx512" OR EMBED_SIMD STREQUAL "x86_auto")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$" AND NOT MSVC)
-    # Try AVX-512 first (F + BW). If you prefer strict detection, gate behind try_compile.
-    if(EMBED_SIMD STREQUAL "avx512")
-      target_compile_options(${PROJECT_NAME} PRIVATE -mavx512f -mavx512bw)
-    elseif(EMBED_SIMD STREQUAL "x86_auto")
-      # Conservative default to AVX2 unless you explicitly ask for avx512.
-      target_compile_options(${PROJECT_NAME} PRIVATE -mavx2 -mfma)
-    endif()
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$" AND MSVC)
-    # MSVC has /arch:AVX2; no broadly supported /arch:AVX512.
-    target_compile_options(${PROJECT_NAME} PRIVATE /arch:AVX2)
-  endif()
-elseif(EMBED_SIMD STREQUAL "avx2")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i.86)$")
-    if(MSVC)
-      target_compile_options(${PROJECT_NAME} PRIVATE /arch:AVX2)
-    else()
-      target_compile_options(${PROJECT_NAME} PRIVATE -mavx2 -mfma)
-    endif()
-  endif()
-elseif(EMBED_SIMD STREQUAL "neon")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-    # aarch64: NEON is baseline -> no extra flags.
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm")
-    if(NOT MSVC)  # MSVC ARM flags differ; usually not used here.
-      target_compile_options(${PROJECT_NAME} PRIVATE -mfpu=neon)
-    endif()
-  endif()
+# Install this variant
+install(TARGETS embedding_library_memory EXPORT embedding_libraryTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+add_library(embedding_library_static  src/int8_embedding_table.c)
+
+target_include_directories(embedding_library_static PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+set_target_properties(embedding_library_static PROPERTIES
+  C_STANDARD 17
+  C_STANDARD_REQUIRED YES
+  POSITION_INDEPENDENT_CODE ON
+)
+
+if("CXX" IN_LIST CMAKE_PROJECT_LANGUAGES)
+  set_target_properties(embedding_library_static PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+  )
 endif()
 
-# ── libm for sqrt/sqrtf (shared builds need it on Linux) ──────────────────────
-find_library(M_LIB m)
-if(M_LIB)
-  target_link_libraries(${PROJECT_NAME} PUBLIC ${M_LIB})
+# Link deps once
+target_link_libraries(embedding_library_static PUBLIC  m)
+
+# Per-variant optimization flavor
+target_compile_options(embedding_library_static PRIVATE ${_A_RELEASE_OPTS})
+
+# Memory profiling macro on the memory variant (opt-in)
+
+# Install this variant
+install(TARGETS embedding_library_static EXPORT embedding_libraryTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+add_library(embedding_library_shared  src/int8_embedding_table.c)
+
+target_include_directories(embedding_library_shared PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+set_target_properties(embedding_library_shared PROPERTIES
+  C_STANDARD 17
+  C_STANDARD_REQUIRED YES
+  POSITION_INDEPENDENT_CODE ON
+)
+
+if("CXX" IN_LIST CMAKE_PROJECT_LANGUAGES)
+  set_target_properties(embedding_library_shared PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+  )
 endif()
 
-# ── Install/export like your other libraries ──────────────────────────────────
-include(GNUInstallDirs)
-install(TARGETS ${PROJECT_NAME} EXPORT ${PROJECT_NAME}Targets
+# Link deps once
+target_link_libraries(embedding_library_shared PUBLIC  m)
+
+# Per-variant optimization flavor
+target_compile_options(embedding_library_shared PRIVATE ${_A_RELEASE_OPTS})
+
+# Memory profiling macro on the memory variant (opt-in)
+
+# Install this variant
+install(TARGETS embedding_library_shared EXPORT embedding_libraryTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-
-# Auto-suffixed exported imported target name: the_embedding_library_<variant>
-if(NOT A_BUILD_IMPORT_NAME)
-  set(A_BUILD_IMPORT_NAME "${PROJECT_NAME}_${A_BUILD_VARIANT}")
+# In-tree umbrella alias picking one variant (for unified builds)
+string(REPLACE "-" "_" _variant_us "${A_BUILD_VARIANT}")
+set(_sel_tgt "embedding_library_${_variant_us}")
+if(TARGET "${_sel_tgt}")
+  add_library(embedding_library::embedding_library ALIAS ${_sel_tgt})
 endif()
-set_target_properties(${PROJECT_NAME} PROPERTIES EXPORT_NAME "${A_BUILD_IMPORT_NAME}")
 
-# Export file uses variant suffix (so you can install multiple variants)
-set(A_BUILD_EXPORT_FILE_SUFFIX "${A_BUILD_VARIANT}")
-install(EXPORT ${PROJECT_NAME}Targets
-  FILE "${PROJECT_NAME}Targets-${A_BUILD_EXPORT_FILE_SUFFIX}.cmake"
-  NAMESPACE ${PROJECT_NAME}::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME})
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
-# ── Package config (aggregator) ───────────────────────────────────────────────
-set(A_BUILD_VARIANTS "debug;memory;coverage;static;shared")
+# Export all variant targets together
+install(EXPORT embedding_libraryTargets
+  FILE embedding_libraryTargets.cmake
+  NAMESPACE embedding_library::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/embedding_library)
+
+# ---- Package config with umbrella target -------------------------------------
 set(_CFG_IN "${CMAKE_CURRENT_BINARY_DIR}/config.cmake.in")
 file(WRITE "${_CFG_IN}" [=[
 @PACKAGE_INIT@
-function(_@A_BUILD_TARGET_BASENAME@_cfg)
-  include(CMakeFindDependencyMacro)
-  set(_pkg "@A_BUILD_TARGET_BASENAME@")
-  set(_ns  "@A_BUILD_EXPORT_NAMESPACE@")
-  set(_deps "@A_BUILD_DEPS@")
-  set(_flavors "@A_BUILD_VARIANTS@")
+include(CMakeFindDependencyMacro)
 
-  foreach(_dep IN LISTS _deps)
-    if(_dep)
-      find_dependency("${_dep}" REQUIRED)
-    endif()
-  endforeach()
+if(NOT DEFINED A_BUILD_VARIANT OR A_BUILD_VARIANT STREQUAL "")
+  set(A_BUILD_VARIANT "debug")
+endif()
+string(REPLACE "-" "_" _picked_us "${A_BUILD_VARIANT}")
 
-  if(NOT TARGET ${_ns}::${_pkg})
-    add_library(${_ns}::${_pkg} INTERFACE IMPORTED)
+set(_save_variant "${A_BUILD_VARIANT}")
+set(_deps "@A_BUILD_DEPS@")
+foreach(_dep IN LISTS _deps)
+  if(_dep)
+    find_dependency("${_dep}" REQUIRED)
   endif()
+endforeach()
+set(A_BUILD_VARIANT "${_save_variant}")
 
-  if(NOT DEFINED A_BUILD_VARIANT)
-    set(A_BUILD_VARIANT "debug")
-  endif()
-  list(FIND _flavors "${A_BUILD_VARIANT}" _idx)
-  if(_idx EQUAL -1)
-    message(FATAL_ERROR "${_pkg}: variant '${A_BUILD_VARIANT}' not recognized (must be one of: ${_flavors})")
-  endif()
+include("${CMAKE_CURRENT_LIST_DIR}/embedding_libraryTargets.cmake")
 
-  set(_picked "${A_BUILD_VARIANT}")
-  set(_dir "${CMAKE_CURRENT_LIST_DIR}")
-  set(_f "${_pkg}Targets-${_picked}.cmake")
-  if(EXISTS "${_dir}/${_f}")
-    include("${_dir}/${_f}")
-  else()
-    message(FATAL_ERROR "${_pkg}: variant '${_picked}' not installed.")
-  endif()
+set(_ns "@A_BUILD_EXPORT_NAMESPACE@")
+set(_pkg "@A_BUILD_TARGET_BASENAME@")
+if(NOT TARGET ${_ns}::${_pkg})
+  add_library(${_ns}::${_pkg} INTERFACE IMPORTED)
+endif()
 
-  string(REPLACE "-" "_" _picked_us "${_picked}")
-  set(_pick ${_ns}::${_pkg}_${_picked_us})
-  if(TARGET "${_pick}")
-    target_link_libraries(${_ns}::${_pkg} INTERFACE "${_pick}")
-  else()
-    message(FATAL_ERROR "${_pkg}: expected target '${_pick}' not defined by export.")
-  endif()
-
-  set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
-  set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL    Release)
-endfunction()
-_@A_BUILD_TARGET_BASENAME@_cfg()
+set(_pick ${_ns}::${_pkg}_${_picked_us})
+if(TARGET "${_pick}")
+  target_link_libraries(${_ns}::${_pkg} INTERFACE "${_pick}")
+endif()
 ]=])
 
-set(A_BUILD_TARGET_BASENAME "${PROJECT_NAME}")
-set(A_BUILD_EXPORT_NAMESPACE "${PROJECT_NAME}")
-set(A_BUILD_DEPS "")  # no package deps
+set(A_BUILD_TARGET_BASENAME "embedding_library")
+set(A_BUILD_EXPORT_NAMESPACE "embedding_library")
+set(A_BUILD_DEPS "")
 
 include(CMakePackageConfigHelpers)
 configure_package_config_file(
   "${_CFG_IN}"
-  "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake"
-  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}"
+  "${CMAKE_CURRENT_BINARY_DIR}/embedding_libraryConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/embedding_library
 )
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/embedding_libraryConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/embedding_libraryConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/embedding_libraryConfigVersion.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/embedding_library
+)
+# Extra project-specific targets
 
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake"
-        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
+
+enable_testing()
+add_subdirectory(tests)
